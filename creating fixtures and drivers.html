@@ -488,6 +488,8 @@ async function runScript() {
   const scale        = n('scale');
 
   if (!ip || !port) { showResp('err', 'Validation Error', 'IP and Port are required.'); return; }
+  // FixtureGroup clamps its grid to 1..1024; units outside that would be patched with no fixture
+  if (nUnits < 1 || nUnits > 1024) { showResp('err', 'Validation Error', 'Units must be between 1 and 1024.'); return; }
 
   setLoading(true);
 
@@ -539,18 +541,16 @@ driver.saveOnDelete()`;
 lights_at_start = [str(l.path) for l in state.stage.dmxLights if l is not None]
 resources_at_start = [str(r.path) for r in resourceManager.allResources(FixtureGroup)]
 
-fixture_name  = "${fixtureName}"
-driver_name   = "${driverName}"
-assigner_name = "${assignerName}"
-dmx_light_name = "${dmxLightName}"
+fixture_name  = ${JSON.stringify(fixtureName)}
+driver_name   = ${JSON.stringify(driverName)}
+assigner_name = ${JSON.stringify(assignerName)}
+dmx_light_name = ${JSON.stringify(dmxLightName)}
 
 # 1. Create Fixture Resource
 fixture_path = Path("objects/fixture/{}.apx".format(fixture_name))
 fixture = resourceManager.loadOrCreate(fixture_path, Fixture)
 fixture.nChannels = ${nChannels}
 fixture.size_ = Vec(${sizeX}, ${sizeY}, ${sizeZ})
-markDirty(fixture)
-fixture.saveOnDelete()
 
 ${driverBlock}
 
@@ -587,31 +587,30 @@ patch.saveOnDelete()
 dmx_light_path = Path("objects/dmxlights/{}.apx".format(dmx_light_name))
 is_new_light = str(dmx_light_path) not in resources_at_start
 dmx_light = resourceManager.loadOrCreate(dmx_light_path, FixtureGroup)
-# FixtureGroup is a Display: rename() on a new one initialises it, adds it
-# to stage.dmxLights and creates its "(direct)" projection. Don't also
-# append or saveOnDelete it, or the resource is registered twice.
-if is_new_light:
-    dmx_light.rename(dmx_light.path)
-dmx_light.fixture    = fixture
-# An empty fixture grid makes FixtureGroup::assignPositions index [0] of 0
-dmx_light.nAcross    = max(1, ${nUnits})
-dmx_light.nDown      = 1
+
 dmx_light.assignment = patch
 dmx_light.offset = Vec(${offsetX}, ${offsetY}, ${offsetZ})
-# Assign channels only once the light is linked to the fixture and patch
-patch.assign()
+# Set these last: setting any other field after them cancels the fixture
+# grid rebuild, and the next frame then indexes an empty instance list.
+dmx_light.fixture    = fixture
+dmx_light.nAcross    = ${nUnits}
+dmx_light.nDown      = 1
+# Mark dirty so edits to an existing light are saved. Don't saveOnDelete it:
+# the stage owns it, and registering it twice duplicates the resource.
+markDirty(dmx_light)
+# Channels are assigned on the next frame: the light links itself to the
+# assigner and calls assign() when the fixture or assigner changes.
 
-# Make sure the light is on the stage exactly once
+# Make sure the light is on the stage exactly once, with no None entries
 stage = state.stage
-lights_after_create = [str(l.path) for l in stage.dmxLights if l is not None]
+current = list(stage.dmxLights)
+lights_after_create = [str(l.path) for l in current if l is not None]
 unique, seen = [], set()
-for l in stage.dmxLights:
+for l in current + [dmx_light]:
     if l is not None and str(l.path) not in seen:
         seen.add(str(l.path))
         unique.append(l)
-if str(dmx_light.path) not in seen:
-    unique.append(dmx_light)
-if len(unique) != len(stage.dmxLights):
+if [str(l.path) if l is not None else None for l in current] != [str(l.path) for l in unique]:
     markDirty(stage)
     stage.dmxLights = unique
 stage.saveOnDelete()
